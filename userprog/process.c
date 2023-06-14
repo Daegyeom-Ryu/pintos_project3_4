@@ -103,7 +103,7 @@ process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	// 자식이 로드되다가 오류로 exit한 경우
 	if (child->exit_status == -2)
 	{
-		list_remove (&child->child_elem); // 자식이 종료되었으므로 자식 리스트에서 제거
+		// list_remove (&child->child_elem); // 자식이 종료되었으므로 자식 리스트에서 제거
 		sema_up (&child->exit_sema); // 자식이 종료되고 스케줄링이 이어질 수 있도록 부모에게 시그널 전송
 		return TID_ERROR; // TID_ERROR 반환
 	}
