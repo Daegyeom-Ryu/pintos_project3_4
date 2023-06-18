@@ -101,7 +101,7 @@ process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	sema_down (&child->load_sema); // 자식이 로드가 완료될 때까지 부모는 대기
 
 	// 자식이 로드되다가 오류로 exit한 경우
-	if (child->exit_status == -2)
+	if (child->exit_status == TID_ERROR)
 	{
 		// list_remove (&child->child_elem); // 자식이 종료되었으므로 자식 리스트에서 제거
 		sema_up (&child->exit_sema); // 자식이 종료되고 스케줄링이 이어질 수 있도록 부모에게 시그널 전송
@@ -169,12 +169,13 @@ __do_fork (void *aux) {
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
+	// struct intr_frame *parent_if;
+	/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
+	struct intr_frame *parent_if = &parent->parent_if; // 인자로 전달 받은 부모 스레드의 parent_if 필드의 값을 parent_if에 할당
+	/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
 	bool succ = true;
 
-/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
-	parent_if = &parent->parent_if; // 인자로 전달 받은 부모 스레드의 parent_if 필드의 값을 parent_if에 할당
-/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
+
 
 	/* 1. Read the cpu context to local stack. */
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
@@ -225,7 +226,7 @@ __do_fork (void *aux) {
 		do_iret (&if_);
 error:
 	sema_up (&current->load_sema);
-	exit (-2);
+	exit (TID_ERROR);
 /* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
 }
 
@@ -246,7 +247,7 @@ process_exec (void *f_name) { // 문자열 f_name이라는 인자를 입력 받�
 
 	/* We first kill the current context */
 	process_cleanup (); // 새로운 실행 파일을 현재 스레드에 담기 전에 현재 프로세스에 담긴 컨텍스트 삭제(=현재 프로세스에 할당된 page directory와 switch information 삭제)
-
+	supplemental_page_table_init(&thread_current()->spt);
 	/* And then load the binary */
 	success = load (file_name, &_if); // _if와 file_name을 현재 프로세스에 load(성공하면 1을, 실패하면 0을 반환) -> 이 함수에 parsing 작업을 추가 구현해야 한다.
 
@@ -254,7 +255,7 @@ process_exec (void *f_name) { // 문자열 f_name이라는 인자를 입력 받�
 	palloc_free_page (file_name); // file_name은 프로그램 파일 이름을 입력하기 위해 생성한 임시 변수이므로 load를 끝내면 해당 메모리를 반환
 	if (!success) // load에 실패하면 -1 반환
 		return -1;
-
+	
 	/* Start switched process. */
 	do_iret (&_if); // load가 성공적으로 실행되면, 생성된 프로세스로 context switching을 실행
 	NOT_REACHED ();
@@ -310,6 +311,7 @@ process_exit (void) {
 	file_close (curr->running); // 현재 실행 중인 파일도 닫음
 
 	process_cleanup (); // 프로세스를 클린업
+	// hash_destroy(&curr->spt.spt_hash,NULL);
 
 	sema_up (&curr->wait_sema); // 자식이 종료될 때까지 대기하고 있는 부모에게 자식이 종료되었다는 시그널 전송
 	sema_down (&curr->exit_sema); // 자식이 부모의 시그널을 기다렸다가, 대기가 풀리고 나면 다른 스레드가 실행
@@ -738,12 +740,29 @@ install_page (void *upage, void *kpage, bool writable) {
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
-
+struct lazy_load_arg
+{
+	struct file *file;
+	off_t ofs;
+	uint32_t read_bytes;
+	uint32_t zero_bytes;
+};
 static bool
 lazy_load_segment (struct page *page, void *aux) {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+	struct lazy_load_arg *lazy_load_arg = (struct lazy_load_arg *)aux;
+	file_seek(lazy_load_arg->file, lazy_load_arg->ofs);
+	if(file_read(lazy_load_arg->file, page->frame->kva, lazy_load_arg->read_bytes) !=
+	(int)(lazy_load_arg->read_bytes))
+	{
+		palloc_free_page(page->frame->kva);
+		return false;
+	}
+	memset(page->frame->kva + lazy_load_arg->read_bytes, 0, lazy_load_arg->zero_bytes);
+	// free(lazy_load_arg); // 어디서 반환?
+	return true;
 }
 
 /* Loads a segment starting at offset OFS in FILE at address
@@ -775,15 +794,21 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
-		void *aux = NULL;
+		// void *aux = NULL;
+		struct lazy_load_arg *lazy_load_arg = (struct lazy_load_arg *)malloc(sizeof(struct lazy_load_arg));
+		lazy_load_arg->file = file;
+		lazy_load_arg->ofs = ofs;
+		lazy_load_arg->read_bytes = page_read_bytes;
+		lazy_load_arg->zero_bytes = page_zero_bytes;
 		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
-					writable, lazy_load_segment, aux))
+					writable, lazy_load_segment, lazy_load_arg))
 			return false;
 
 		/* Advance. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
+		ofs += page_read_bytes;
 	}
 	return true;
 }
@@ -799,6 +824,12 @@ setup_stack (struct intr_frame *if_) {
 	 * TODO: You should mark the page is stack. */
 	/* TODO: Your code goes here */
 
+	if (vm_alloc_page_with_initializer(VM_ANON, stack_bottom, 1, NULL, NULL))
+	{
+		success = vm_claim_page(stack_bottom);
+		if (success)
+			if_->rsp = USER_STACK;
+	}
 	return success;
 }
 #endif /* VM */

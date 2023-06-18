@@ -115,9 +115,9 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		case SYS_CLOSE :
 			close (f->R.rdi);
 			break;
-		default :
-			exit (-1);
-			break;
+		// default :
+		// 	exit (-1);
+		// 	break;
 	}
 
 	// printf ("system call!\n");
@@ -130,9 +130,14 @@ syscall_handler (struct intr_frame *f UNUSED) {
 void
 check_address (void *addr) {
 	// 현재 접근하는 메모리 주소가 NULL이거나, 커널 영역에서 사용하는 주소이거나, 유저 영역에서 사용하는 주소이지만 페이지로 할당되지 않은 주소일 경우(=잘못된 접근)
-	if (addr == NULL || is_kernel_vaddr(addr) || pml4_get_page (thread_current ()->pml4, addr) == NULL) {
+	if (addr == NULL){
 		exit(-1); // 프로세스 종료
 	}
+	if (!is_user_vaddr(addr)){
+		exit(-1);
+	}
+	//if (pml4_get_page (thread_current ()->pml4, addr) == NULL)
+	//	exit(-1);
 }
 
 /* 현재 프로세스의 파일 디스크립터 테이블에 파일을 추가하는 함수 */
