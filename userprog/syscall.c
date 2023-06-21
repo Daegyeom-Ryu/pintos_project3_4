@@ -115,9 +115,9 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		case SYS_CLOSE :
 			close (f->R.rdi);
 			break;
-		// default :
-		// 	exit (-1);
-		// 	break;
+		default :
+			exit (-1);
+			break;
 	}
 
 	// printf ("system call!\n");
@@ -133,7 +133,7 @@ check_address (void *addr) {
 	if (addr == NULL){
 		exit(-1); // 프로세스 종료
 	}
-	if (!is_user_vaddr(addr)){
+	if (is_kernel_vaddr(addr)){
 		exit(-1);
 	}
 	//if (pml4_get_page (thread_current ()->pml4, addr) == NULL)

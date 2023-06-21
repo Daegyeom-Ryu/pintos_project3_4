@@ -18,6 +18,10 @@
         "ostream": "c",
         "streambuf": "c",
         "stdbool.h": "c",
-        "interrupt.h": "c"
+        "interrupt.h": "c",
+        "memory_resource": "c",
+        "deque": "c",
+        "string": "c",
+        "vector": "c"
     }
 }

@@ -169,11 +169,13 @@ __do_fork (void *aux) {
 	struct thread *parent = (struct thread *) aux;
 	struct thread *current = thread_current ();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	// struct intr_frame *parent_if;
-	/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
-	struct intr_frame *parent_if = &parent->parent_if; // 인자로 전달 받은 부모 스레드의 parent_if 필드의 값을 parent_if에 할당
-	/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
+	struct intr_frame *parent_if;
 	bool succ = true;
+
+	/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
+	parent_if = &parent->parent_if; // 인자로 전달 받은 부모 스레드의 parent_if 필드의 값을 parent_if에 할당
+	/* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
+	
 
 
 
@@ -192,6 +194,7 @@ __do_fork (void *aux) {
 	process_activate (current);
 #ifdef VM
 	supplemental_page_table_init (&current->spt);
+	// fork 시에 부모 프로세스의 SPT를 자식에게 상속
 	if (!supplemental_page_table_copy (&current->spt, &parent->spt))
 		goto error;
 #else
@@ -324,6 +327,7 @@ process_cleanup (void) {
 	struct thread *curr = thread_current ();
 
 #ifdef VM
+	// 아래 함수에서는 hase_destroy 대신 hash_clear 사용(hash_clear: 내용만 지움, hash_destroy: hash가 사용하던 메모리까지 반환)
 	supplemental_page_table_kill (&curr->spt);
 #endif
 
@@ -747,19 +751,23 @@ struct lazy_load_arg
 	uint32_t read_bytes;
 	uint32_t zero_bytes;
 };
+/* 실행파일의 내용을 페이지로 로딩하는 함수이며 첫 page fault(frame x, 내용 x)가 발생할 때 호출 */
+
 static bool
 lazy_load_segment (struct page *page, void *aux) {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
 	struct lazy_load_arg *lazy_load_arg = (struct lazy_load_arg *)aux;
+	// 1. 읽어들일 위치 지정 
 	file_seek(lazy_load_arg->file, lazy_load_arg->ofs);
-	if(file_read(lazy_load_arg->file, page->frame->kva, lazy_load_arg->read_bytes) !=
-	(int)(lazy_load_arg->read_bytes))
+	// 2. read_bytes만큼 물리 프레임에 읽어 들임
+	if(file_read(lazy_load_arg->file, page->frame->kva, lazy_load_arg->read_bytes) != (int)(lazy_load_arg->read_bytes))
 	{
 		palloc_free_page(page->frame->kva);
 		return false;
 	}
+	// 3. 읽어들이고 남은 부분 0으로 채움
 	memset(page->frame->kva + lazy_load_arg->read_bytes, 0, lazy_load_arg->zero_bytes);
 	// free(lazy_load_arg); // 어디서 반환?
 	return true;
@@ -782,29 +790,36 @@ lazy_load_segment (struct page *page, void *aux) {
 static bool
 load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes, bool writable) {
-	ASSERT ((read_bytes + zero_bytes) % PGSIZE == 0);
-	ASSERT (pg_ofs (upage) == 0);
-	ASSERT (ofs % PGSIZE == 0);
+	ASSERT ((read_bytes + zero_bytes) % PGSIZE == 0);	// 페이지 크기의 배수인지 확인
+	ASSERT (pg_ofs (upage) == 0);						// upage 페이지 정렬 확인
+	ASSERT (ofs % PGSIZE == 0);							// ofs 가 PGSIZE 안넘는지 확인
 
 	while (read_bytes > 0 || zero_bytes > 0) {
 		/* Do calculate how to fill this page.
 		 * We will read PAGE_READ_BYTES bytes from FILE
 		 * and zero the final PAGE_ZERO_BYTES bytes. */
+
+		// 파일에서 page_read_bytes만큼 읽고 나머지 page_zero_bytes만큼 0으로 채움
 		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
 		// void *aux = NULL;
+
+		// lazy loading을 위해 필요한 정보 구조체에 담음
 		struct lazy_load_arg *lazy_load_arg = (struct lazy_load_arg *)malloc(sizeof(struct lazy_load_arg));
-		lazy_load_arg->file = file;
-		lazy_load_arg->ofs = ofs;
-		lazy_load_arg->read_bytes = page_read_bytes;
-		lazy_load_arg->zero_bytes = page_zero_bytes;
+		lazy_load_arg->file = file;						// 내용이 담긴 파일 객체
+		lazy_load_arg->ofs = ofs;						// 페이지에서 읽기 시작할 위치
+		lazy_load_arg->read_bytes = page_read_bytes;	// 페이지에서 읽어야 하는 바이트 수
+		lazy_load_arg->zero_bytes = page_zero_bytes;	// read_bytes만큼 읽고 공간이 남으면 채워야하는 바이트 수 
+		// 커널이 새로운 페이지 요청을 받으면 호출하는 함수
+		// lazy_load_segment는 첫 페이지 폴트가 발생했을 때 호출되고, 인자 *aux로 lazy_load_arg 가짐
 		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
 					writable, lazy_load_segment, lazy_load_arg))
 			return false;
 
 		/* Advance. */
+		// 다음에 읽어들일때를 위해서 값 갱신
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
@@ -817,6 +832,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 setup_stack (struct intr_frame *if_) {
 	bool success = false;
+	// 스택은 아래로 성장, USER_STACK에서 PGSIZE만큼 내린 지점에서 페이지를 생성한다.
 	void *stack_bottom = (void *) (((uint8_t *) USER_STACK) - PGSIZE);
 
 	/* TODO: Map the stack on stack_bottom and claim the page immediately.
@@ -824,10 +840,15 @@ setup_stack (struct intr_frame *if_) {
 	 * TODO: You should mark the page is stack. */
 	/* TODO: Your code goes here */
 
-	if (vm_alloc_page_with_initializer(VM_ANON, stack_bottom, 1, NULL, NULL))
+		// 1. stack_bottom에 페이지를 하나 할당 받는다.
+		// VM_MARKER_0 : 스택이 저장된 메모리 페이지임을 식별하기 위해 추가
+		// writable: argument_stack()에서 값을 넣어야 하니 True
+	if (vm_alloc_page_with_initializer(VM_ANON | VM_MARKER_0, stack_bottom, 1, NULL, NULL))
 	{
+		// 2. 할당받은 페이지에 물리 프레임 매핑
 		success = vm_claim_page(stack_bottom);
 		if (success)
+		// 3. argument 인자를 쌓아야 하므로 rsp를 USER_STACK으로 변경
 			if_->rsp = USER_STACK;
 	}
 	return success;

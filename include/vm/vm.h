@@ -2,8 +2,8 @@
 #define VM_VM_H
 #include <stdbool.h>
 #include "threads/palloc.h"
-// #include "hash.h"
-#include "include/lib/kernel/hash.h"
+#include "hash.h"
+
 enum vm_type {
 	/* page not initialized */
 	VM_UNINIT = 0,
@@ -43,12 +43,14 @@ struct thread;
  * DO NOT REMOVE/MODIFY PREDEFINED MEMBER OF THIS STRUCTURE. */
 struct page {
 	const struct page_operations *operations;
-	void *va;              /* Address in terms of user space */
+	void *va;              /* Address in terms of user space */ 	// va는 hash table의 key가 된다. page->va
 	struct frame *frame;   /* Back reference for frame */
 
 	/* Your implementation */
-	struct hash_elem hash_elem;
+	/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
+	struct hash_elem hash_elem;	//spt의 구성요소
 	bool writable;
+	/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
 	/* Per-type data are binded into the union.
 	 * Each function automatically detects the current union */
 	union {
@@ -65,7 +67,10 @@ struct page {
 struct frame {
 	void *kva;
 	struct page *page;
-	struct list_elem frame_elem;
+	/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
+	struct list_elem frame_elem;	// frame_table의 요소
+	/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
+	// struct list_elem elem;
 };
 
 /* The function table for page operations.
@@ -87,9 +92,12 @@ struct page_operations {
 /* Representation of current process's memory space.
  * We don't want to force you to obey any specific design for this struct.
  * All designs up to you for this. */
+
+/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
 struct supplemental_page_table {
-	struct hash *spt_hash;
+	struct hash spt_hash;	// supplemental page table로 hash table 사용
 };
+/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
 
 #include "threads/thread.h"
 void supplemental_page_table_init (struct supplemental_page_table *spt);
@@ -112,6 +120,11 @@ bool vm_alloc_page_with_initializer (enum vm_type type, void *upage,
 void vm_dealloc_page (struct page *page);
 bool vm_claim_page (void *va);
 enum vm_type page_get_type (struct page *page);
-void hash_page_destroy(struct hash_elem *e, void *aux);
-// struct list frame_table;
+// void hash_page_destroy(struct hash_elem *e, void *aux);
+// unsigned page_hash(const struct hash_elem *p_, void *aux UNUSED);
+// bool page_less (const struct hash_elem *a_, const struct hash_elem *b_, void *aux UNUSED);
+
+/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
+struct list frame_table;	// 물리 메모리를 관리하기 위해 사용
+/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
 #endif  /* VM_VM_H */
