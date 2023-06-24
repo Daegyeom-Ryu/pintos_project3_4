@@ -15,6 +15,8 @@
 #include "include/filesys/file.h" // 파일 디스크립터 시스템 콜 함수에서 file 관련 함수를 호출하기 위한 헤더 추가
 #include <stdbool.h> // bool 타입을 사용하기 위한 헤더 추가
 
+#include "vm/vm.h"
+
 void check_address (void *addr); // 주소 값이 유저 영역에서 사용하는 주소 값인지 확인 하는 함수 선언
 int add_file_to_fdt (struct file *file); // 현재 프로세스의 파일 디스크립터 테이블에 파일을 추가하는 함수 선언
 static struct file *find_file_by_fd (int fd); // fd로 파일을 찾는 함수 선언
@@ -34,6 +36,8 @@ void seek (int fd, unsigned position); // 열린 파일의 위치(offset)를 이
 unsigned tell (int fd); // 열린 파일의 위치(offset)를 알려주는 시스템 콜 함수 선언
 void close (int fd);  // 열린 파일을 닫는 시스템 콜 함수 선언
 /* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
+void *mmap (void *addr, size_t length, int writable, int fd, off_t offset);
+void munmap(void *addr);
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -72,6 +76,11 @@ void
 syscall_handler (struct intr_frame *f UNUSED) {
 /* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
 	int system_call_number = f->R.rax; // 호출한 시스템 콜 번호를 저장하는 변수 선언
+	/* -------------------------------------------------------- PROJECT3 : Stack_growth - VM -------------------------------------------------------- */
+	#ifdef VM
+	thread_current()->rsp=f->rsp;
+	#endif
+	/* -------------------------------------------------------- PROJECT3 : Stack_growth - VM -------------------------------------------------------- */
 	switch(system_call_number) {
 		case SYS_HALT :
 			halt ();
@@ -115,9 +124,17 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		case SYS_CLOSE :
 			close (f->R.rdi);
 			break;
-		default :
-			exit (-1);
+		/* -------------------------------------------------------- PROJECT3 : file_backed_file - VM -------------------------------------------------------- */
+		case SYS_MMAP:
+			f->R.rax = mmap(f->R.rdi, f->R.rsi, f->R.rdx, f->R.r10, f->R.r8);
 			break;
+		case SYS_MUNMAP:
+			munmap(f->R.rdi);
+			break;
+		/* -------------------------------------------------------- PROJECT3 : file_backed_file - VM -------------------------------------------------------- */
+		// default :
+		// 	exit (-1);
+		// 	break;
 	}
 
 	// printf ("system call!\n");
@@ -235,7 +252,10 @@ wait (int pid) {
 bool
 create (const char *file, unsigned initial_size) {
 	check_address (file); // 현재 가리키는 주소가 유저 영역의 주소인지 확인하여, 잘못된 주소이면 프로세스 종료
-	return filesys_create (file, initial_size); // 파일 이름(file)과 크기(initial_size)에 해당하는 파일 생성(성공하면 True, 실패하면 False 반환)
+	lock_acquire(&filesys_lock);
+	bool success = filesys_create (file, initial_size); // 파일 이름(file)과 크기(initial_size)에 해당하는 파일 생성(성공하면 True, 실패하면 False 반환)
+	lock_release(&filesys_lock);
+	return success;
 }
 
 /* 파일을 삭제하는 시스템 콜 함수 */
@@ -246,13 +266,16 @@ remove (const char *file) {
 }
 
 /* 파일을 오픈하는 시스템 콜 함수 */
+/////////////////////////// 안돼면 lock 추가
 int
 open (const char *file) {
 	check_address (file); // 현재 가리키는 주소가 유저 영역의 주소인지 확인하여, 잘못된 주소이면 프로세스 종료
+	lock_acquire(&filesys_lock);
 	struct file *open_file = filesys_open (file); // filesys_open() 함수를 이용하여 파일 오픈
 
 	// 파일을 찾지 못하거나 내부 메모리 할당에 실패하여 파일을 열 수 없는 경우 -1 반환
 	if (open_file == NULL) {
+		lock_release(&filesys_lock);
 		return -1;
 	}
 
@@ -262,6 +285,7 @@ open (const char *file) {
 	if (fd == -1) {
 		file_close (open_file);
 	}
+	lock_release(&filesys_lock);
 
 	return fd; // fd 반환
 }
@@ -316,6 +340,12 @@ read (int fd, void *buffer, unsigned size) {
             return -1;
         }
 
+		struct page *page = spt_find_page(&thread_current()->spt, buffer);
+		if (page && !page->writable)
+		{
+			// lock_release(&filesys_lock);
+			exit(-1);
+		}
         lock_acquire (&filesys_lock); // 열린 파일의 데이터를 읽고 버퍼에 저장하는 과정에서 다른 파일의 접근을 막기 위해 lock 획득
         read_byte = file_read (read_file, buffer, size); // 파일에서 현재 위치부터 size 바이트 만큼 데이터를 읽어서 버퍼에 저장하는 file_read() 함수 호출
         lock_release (&filesys_lock); // 열린 파일의 데이터를 읽고 버퍼에 저장을 완료하면 lock 해제
@@ -396,3 +426,36 @@ close (int fd) {
 	remove_file_from_fdt (fd); // remove_file_from_fdt() 함수를 이용하여 닫은 파일 삭제
 }
 /* -------------------------------------------------------- PROJECT2 : User Program - System Call -------------------------------------------------------- */
+
+/* -------------------------------------------------------- PROJECT3 : file_backed_file - VM -------------------------------------------------------- */
+void *mmap (void *addr, size_t length, int writable, int fd, off_t offset){
+	if (addr==NULL)
+		return NULL;
+	// addr가 page-aligned 되지 않은 경우
+	if (addr!=pg_round_down(addr))
+		return NULL;
+	// offset이 page-aligned 되지 않은 경우
+	if (offset!=pg_round_down(offset))
+		return NULL;
+	// addr 또는 addr+length가 user_addr가 아닌 경우
+	if (!is_user_vaddr(addr) || !is_user_vaddr(addr+length))
+		return NULL;
+	// addr에 할당된 페이지가 이미 존재하는 경우
+	if (spt_find_page(&thread_current()->spt, addr))
+		return NULL;
+	// 입출력 fd인 경우
+	if(fd==0 || fd==1)
+		return NULL;
+	struct file *f= find_file_by_fd(fd);
+	// fd에 해당하는 file이 없는 경우
+	if(f==NULL)
+		return NULL;
+	// file의 길이가 0이거나 0보다 작은 경우
+	if(file_length(f) == 0||(int)length <= 0)
+		return NULL;
+
+	return do_mmap (addr, length, writable, f, offset);
+}
+void munmap(void *addr){
+	do_munmap(addr);
+}/* -------------------------------------------------------- PROJECT3 : file_backed_file - VM -------------------------------------------------------- */

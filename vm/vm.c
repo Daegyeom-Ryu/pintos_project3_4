@@ -6,6 +6,7 @@
 #include "vm/vm.h"
 #include "vm/inspect.h"
 #include "hash.h"
+#include "userprog/process.h"
 
 
 
@@ -49,6 +50,8 @@ bool page_less(const struct hash_elem *a_, const struct hash_elem *b_, void *aux
  * `vm_alloc_page`. */
 
 /* 커널이 새로운 페이지 요청을 받으면 호출하는 함수 */
+/* 페이지를 생성하려면 직접 생성하지 말고 이 함수나 vm_alloc_page를 통해 만든다 */
+/* init과 aux는 첫 page fault가 발생할 때 호출된다. */
 bool
 vm_alloc_page_with_initializer (enum vm_type type, void *upage, bool writable,
 		vm_initializer *init, void *aux) {
@@ -75,7 +78,8 @@ vm_alloc_page_with_initializer (enum vm_type type, void *upage, bool writable,
 			page_initializer = file_backed_initializer;
 			break;
 		}
-		// 2. uninit_new: 페이지 구조체 생성 후 uninit type으로 만들고, 페이지 type에 맞는 초기화 함수를 담아둠
+		// 2. uninit_new: 페이지 구조체 생성 후 uninit type으로 만들고, 
+		// 페이지 type에 맞는 초기화 함수(page_initializer)를 담아둠
 		uninit_new(p, upage, init, type, aux, page_initializer);
 		p->writable = writable;
 		/* TODO: Insert the page into the spt. */
@@ -86,6 +90,7 @@ err:
 }
 
 /* Find VA from spt and return page. On error, return NULL. */
+/* spt에서 va에 해당하는 page를 찾아서 반환 */
 struct page *
 spt_find_page (struct supplemental_page_table *spt UNUSED, void *va UNUSED) {
 	struct page *page = NULL;
@@ -111,6 +116,7 @@ spt_insert_page (struct supplemental_page_table *spt UNUSED, struct page *page U
 
 void
 spt_remove_page (struct supplemental_page_table *spt, struct page *page) {
+	hash_delete(&spt->spt_hash, &page->hash_elem);
 	vm_dealloc_page (page);
 	return true;
 }
@@ -142,7 +148,7 @@ static struct frame *
 vm_get_frame (void) {
 	struct frame *frame = NULL;
 	/* TODO: Fill this function. */
-	void *kva = palloc_get_page(PAL_USER);					// availiable page(frame)를 kernel의 USER_POOL에서 가져오고 해당 커널 가상 주소 반환
+	void *kva = palloc_get_page(PAL_USER);					// availiable page를 kernel의 USER_POOL에서 가져오고 해당 커널 가상 주소 반환
 	if (kva==NULL)											// USER_POOL memory가 꽉 차서 이용할 수 없다면 frame 축출해서 그 frame 가져옴
 	{
 		PANIC("todo");
@@ -151,7 +157,7 @@ vm_get_frame (void) {
 		// return victim;
 	}
 	frame = (struct frame *)malloc(sizeof(struct frame));	// frame 할당
-	frame->kva=kva;											// 프레임 멤버 초기화?
+	frame->kva=kva;											
 
 	frame->page = NULL;
 
@@ -163,6 +169,9 @@ vm_get_frame (void) {
 /* Growing the stack. */
 static void
 vm_stack_growth (void *addr UNUSED) {
+	// 스택 크기를 증가시키기 위해 anon page를 하나 이상 할당하여 주어진 주소(addr)가 더 이상 예외 주소(faulted address)가 되지 않도록 한다.
+	// 할당할 때 addr을 PGSIZE 정렬해서 내림
+	vm_alloc_page_with_initializer(VM_ANON | VM_MARKER_0, pg_round_down(addr), 1, NULL, NULL);
 }
 
 /* Handle the fault on write_protected page */
@@ -172,7 +181,7 @@ vm_handle_wp (struct page *page UNUSED) {
 
 /* Return true on success */
 /* Lazy Loading 디자인 적용 : 메모리 로딩을 필요한 시점까지 미루는 디자인 패턴
-   page fault가 발생했을 때만 page를 frame에 올린다. */
+page fault가 발생했을 때만 page를 frame에 올린다. */
 bool
 vm_try_handle_fault (struct intr_frame *f UNUSED, void *addr UNUSED,
 		bool user UNUSED, bool write UNUSED, bool not_present UNUSED) {
@@ -180,7 +189,7 @@ vm_try_handle_fault (struct intr_frame *f UNUSED, void *addr UNUSED,
 	struct page *page = NULL;
 	/* TODO: Validate the fault */
 	/* TODO: Your code goes here */
-	// 1. 유효한 주소가 아니면 page fault가 아님
+	// 1. 유효한 주소가 아님
 	if (addr == NULL)
 		return false;
 	if (is_kernel_vaddr(addr))
@@ -188,6 +197,17 @@ vm_try_handle_fault (struct intr_frame *f UNUSED, void *addr UNUSED,
 	// 2. page가 frame에 적재되지 않았으면(not_present=1) 
 	if (not_present)
 	{
+		// stack_growth page fault
+		void *rsp = f->rsp;				// user access인 경우 rsp는 intr_frame에서 가져옴
+		if(!user)
+			rsp=thread_current()->rsp;	// kernel access인 경우 user에서 kernel로 transition 직전의 user rsp 값을 thread에 저장해두고 불러움
+		if(USER_STACK-(1<<20)<=addr && addr <= USER_STACK){
+			if (USER_STACK-(1<<20)<=rsp-8 && rsp-8==addr)	// addr이 STACK 영역에 있고 rsp-8(PUSH)에서 page fault 발생 
+				vm_stack_growth(addr);
+			else if (USER_STACK-(1<<20)<=rsp && rsp<=addr)	// addr이 STACK 영역에 있고 rsp보다 addr이 높은 주소일 경우
+				vm_stack_growth(addr);
+			}
+		
 		// 3. spt에서 page를 찾음
 		page = spt_find_page(spt, addr);
 		if (page == NULL)
@@ -247,6 +267,7 @@ supplemental_page_table_init (struct supplemental_page_table *spt UNUSED) {
 }
 
 /* Copy supplemental page table from src to dst */
+// SPT를 복사하는 함수 (자식 프로세스가 부모 프로세스의 실행 컨텍스트를 상속해야 할 때 (즉, fork() 시스템 호출이 사용될 때) 사용)
 bool
 supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED,
 		struct supplemental_page_table *src UNUSED) 
@@ -270,8 +291,23 @@ supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED,
 			vm_alloc_page_with_initializer(VM_ANON, upage, writable, init, aux);
 			continue;
 		}
-
-		/* 2) type이 uninit이 아니면 */
+		/* 2) type이 file이면 */
+		if (type == VM_FILE)
+		{
+			struct lazy_load_arg *file_aux = malloc(sizeof(struct lazy_load_arg));
+            file_aux->file = src_page->file.file;
+            file_aux->ofs = src_page->file.ofs;
+            file_aux->read_bytes = src_page->file.read_bytes;
+            // file_aux->zero_bytes = src_page->file.zero_bytes;
+            if (!vm_alloc_page_with_initializer(type, upage, writable, NULL, file_aux))
+                return false;
+            struct page *file_page = spt_find_page(dst, upage);
+            file_backed_initializer(file_page, type, NULL);
+            file_page->frame = src_page->frame;
+            pml4_set_page(thread_current()->pml4, file_page->va, src_page->frame->kva, src_page->writable);
+            continue;
+		}
+		/* 3) type이 anon이면 */
 		if (!vm_alloc_page_with_initializer(type, upage, writable, NULL, NULL)) // uninit page 생성 & 초기화
 			// init(lazy_load_segment)는 page_fault가 발생할때 호출됨
 			// 지금 만드는 페이지는 page_fault가 일어날 때까지 기다리지 않고 바로 내용을 넣어줘야 하므로 필요 없음
@@ -295,11 +331,20 @@ void hash_page_destroy(struct hash_elem *e, void *aux)
 }
 
 /* Free the resource hold by the supplemental page table */
+// SPT가 보유하고 있던 모든 리소스를 해제하는 함수 (process_exit(), process_cleanup()에서 호출)
 void
 supplemental_page_table_kill (struct supplemental_page_table *spt UNUSED) {
 	/* TODO: Destroy all the supplemental_page_table hold by thread and
 	 * TODO: writeback all the modified contents to the storage. */
+	// 페이지 항목들을 순회하며 테이블 내의 페이지들에 대해 destory(page) 호출
 	hash_clear(&spt->spt_hash, hash_page_destroy); // 해시 테이블에서 모든 요소를 제거
+
+	/** hash_destroy가 아닌 hash_clear를 사용해야 하는 이유
+	 * 여기서 hash_destroy 함수를 사용하면 hash가 사용하던 메모리(hash->bucket) 자체도 반환한다.
+	 * process가 실행될 때 hash table을 생성한 이후에 process_clean()이 호출되는데,
+	 * 이때는 hash table은 남겨두고 안의 요소들만 제거되어야 한다.
+	 * 따라서, hash의 요소들만 제거하는 hash_clear를 사용해야 한다.
+	 */
 }
 
 /* hashed index로 변환하는 함수 */

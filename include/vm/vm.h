@@ -50,6 +50,7 @@ struct page {
 	/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
 	struct hash_elem hash_elem;	//spt의 구성요소
 	bool writable;
+	int mapped_page_count;
 	/* -------------------------------------------------------- PROJECT3 : Memory Management - VM -------------------------------------------------------- */
 	/* Per-type data are binded into the union.
 	 * Each function automatically detects the current union */

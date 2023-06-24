@@ -20,6 +20,7 @@
 #include "intrinsic.h"
 #ifdef VM
 #include "vm/vm.h"
+#include "userprog/syscall.h"
 #endif
 
 static void process_cleanup (void);
@@ -252,8 +253,9 @@ process_exec (void *f_name) { // 문자열 f_name이라는 인자를 입력 받�
 	process_cleanup (); // 새로운 실행 파일을 현재 스레드에 담기 전에 현재 프로세스에 담긴 컨텍스트 삭제(=현재 프로세스에 할당된 page directory와 switch information 삭제)
 	supplemental_page_table_init(&thread_current()->spt);
 	/* And then load the binary */
+	lock_acquire(&filesys_lock);
 	success = load (file_name, &_if); // _if와 file_name을 현재 프로세스에 load(성공하면 1을, 실패하면 0을 반환) -> 이 함수에 parsing 작업을 추가 구현해야 한다.
-
+	lock_release(&filesys_lock);
 	/* If load failed, quit. */
 	palloc_free_page (file_name); // file_name은 프로그램 파일 이름을 입력하기 위해 생성한 임시 변수이므로 load를 끝내면 해당 메모리를 반환
 	if (!success) // load에 실패하면 -1 반환
@@ -731,6 +733,10 @@ setup_stack (struct intr_frame *if_) {
  * with palloc_get_page().
  * Returns true on success, false if UPAGE is already mapped or
  * if memory allocation fails. */
+/* 사용자 가상 주소 UPAGE에서 커널 가상 주소 KPAGE로의 매핑을 페이지 테이블에 추가합니다.
+WRITABLE이 참인 경우, 사용자 프로세스가 페이지를 수정할 수 있습니다. 그렇지 않으면 읽기 전용입니다.
+UPAGE는 이미 매핑되어서는 안 됩니다. KPAGE는 아마도 palloc_get_page()로 사용자 풀에서 가져온 페이지일 것입니다.
+성공 시 true를 반환하고, UPAGE가 이미 매핑되어 있거나 메모리 할당에 실패한 경우 false를 반환합니다. */
 static bool
 install_page (void *upage, void *kpage, bool writable) {
 	struct thread *t = thread_current ();
@@ -744,16 +750,10 @@ install_page (void *upage, void *kpage, bool writable) {
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
-struct lazy_load_arg
-{
-	struct file *file;
-	off_t ofs;
-	uint32_t read_bytes;
-	uint32_t zero_bytes;
-};
+
 /* 실행파일의 내용을 페이지로 로딩하는 함수이며 첫 page fault(frame x, 내용 x)가 발생할 때 호출 */
 
-static bool
+bool
 lazy_load_segment (struct page *page, void *aux) {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
@@ -787,12 +787,19 @@ lazy_load_segment (struct page *page, void *aux) {
  *
  * Return true if successful, false if a memory allocation error
  * or disk read error occurs. */
+/* 파일의 OFS(오프셋)에서 시작하는 세그먼트를 UPAGE에 로드합니다.
+총 READ_BYTES + ZERO_BYTES 바이트의 가상 메모리가 다음과 같이 초기화됩니다:
+- UPAGE에서 READ_BYTES 바이트는 파일의 오프셋 OFS에서 시작하여 읽어야 합니다.
+- UPAGE + READ_BYTES에서 ZERO_BYTES 바이트는 0으로 초기화되어야 합니다.
+이 함수에 의해 초기화된 페이지는 WRITABLE이 참인 경우 사용자 프로세스에 의해
+쓰기 가능해야 하며, 그렇지 않은 경우 읽기 전용이어야 합니다.
+성공적으로 완료되면 true를 반환하고, 메모리 할당 오류 또는 디스크 읽기 오류가 발생하면 false를 반환합니다. */
 static bool
 load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes, bool writable) {
 	ASSERT ((read_bytes + zero_bytes) % PGSIZE == 0);	// 페이지 크기의 배수인지 확인
 	ASSERT (pg_ofs (upage) == 0);						// upage 페이지 정렬 확인
-	ASSERT (ofs % PGSIZE == 0);							// ofs 가 PGSIZE 안넘는지 확인
+	ASSERT (ofs % PGSIZE == 0);							// ofs 페이지 정렬 확인
 
 	while (read_bytes > 0 || zero_bytes > 0) {
 		/* Do calculate how to fill this page.
@@ -829,6 +836,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 }
 
 /* Create a PAGE of stack at the USER_STACK. Return true on success. */
+// USER_STACK에서 스택의 PAGE를 생성합니다. 성공하면 true를 반환합니다.
 static bool
 setup_stack (struct intr_frame *if_) {
 	bool success = false;
